@@ -1,1 +1,612 @@
+"""
+CodeRefine Premium: AI-Powered Code Analysis & Execution Platform
+Multi-Language Support | Instant Execution | Smart Error Detection
+"""
 
+import gradio as gr
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    print("Warning: Groq SDK not installed. Install with: pip install groq")
+
+import json
+import os
+from datetime import datetime
+import subprocess
+import sys
+import tempfile
+import re
+
+# User database
+USERS_FILE = "coderefine_users.json"
+users_db = {}
+
+if os.path.exists(USERS_FILE):
+    try:
+        with open(USERS_FILE, 'r') as f:
+            users_db = json.load(f)
+    except:
+        users_db = {}
+
+# Initialize
+client = None
+current_user = None
+
+def save_users():
+    """Save users to file"""
+    try:
+        with open(USERS_FILE, 'w') as f:
+            json.dump(users_db, f, indent=2)
+    except Exception as e:
+        print(f"Error saving users: {e}")
+
+def signup(username, password, confirm_password):
+    """User signup"""
+    if not username or not password:
+        return "❌ Username and password are required!", None
+    
+    if password != confirm_password:
+        return "❌ Passwords do not match!", None
+    
+    if len(password) < 6:
+        return "❌ Password must be at least 6 characters!", None
+    
+    if username in users_db:
+        return "❌ Username already exists! Please login.", None
+    
+    users_db[username] = {
+        "password": password,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "analyses_count": 0
+    }
+    save_users()
+    
+    return f"✅ Account created successfully! Welcome {username}!", gr.update(visible=True)
+
+def login(username, password):
+    """User login"""
+    global current_user
+    
+    if not username or not password:
+        return "❌ Username and password are required!", None, None
+    
+    if username not in users_db:
+        return "❌ User not found! Please signup first.", None, None
+    
+    if users_db[username]["password"] != password:
+        return "❌ Incorrect password!", None, None
+    
+    current_user = username
+    return f"✅ Welcome back, {username}!", gr.update(visible=True), gr.update(visible=False)
+
+def logout():
+    """User logout"""
+    global current_user
+    current_user = None
+    return gr.update(visible=False), gr.update(visible=True)
+
+def initialize_groq(api_key):
+    """Initialize Groq client"""
+    global client
+    
+    if not GROQ_AVAILABLE:
+        return "❌ Error: Groq SDK not installed. Run: pip install groq"
+    
+    try:
+        if not api_key or not api_key.strip():
+            return "⚠️ Please enter a valid API key"
+        
+        client = Groq(api_key=api_key.strip())
+        return "✅ API Key configured successfully!"
+    except Exception as e:
+        return f"❌ Error: {str(e)}"
+
+def execute_code(code, language):
+    """Execute code in multiple languages and return output"""
+    try:
+        if not code.strip():
+            return "⚠️ No code to execute!", ""
+        
+        # Python
+        if language == "Python":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                result = subprocess.run(
+                    [sys.executable, temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = result.stdout if result.stdout else ""
+                error = result.stderr if result.stderr else ""
+                
+                if result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Execution Error:\n{error}"
+            finally:
+                os.unlink(temp_file)
+        
+        # JavaScript/Node.js
+        elif language == "JavaScript":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                result = subprocess.run(
+                    ['node', temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = result.stdout if result.stdout else ""
+                error = result.stderr if result.stderr else ""
+                
+                if result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Execution Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ Node.js not installed on this system"
+            finally:
+                os.unlink(temp_file)
+        
+        # Java
+        elif language == "Java":
+            # Extract class name
+            class_match = re.search(r'class\s+(\w+)', code)
+            if not class_match:
+                return "❌ No class definition found in Java code"
+            
+            class_name = class_match.group(1)
+            
+            with tempfile.TemporaryDirectory() as temp_dir:
+                java_file = os.path.join(temp_dir, f"{class_name}.java")
+                
+                with open(java_file, 'w') as f:
+                    f.write(code)
+                
+                # Compile
+                compile_result = subprocess.run(
+                    ['javac', java_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if compile_result.returncode != 0:
+                    return f"❌ Compilation Error:\n{compile_result.stderr}"
+                
+                # Run
+                run_result = subprocess.run(
+                    ['java', '-cp', temp_dir, class_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = run_result.stdout if run_result.stdout else ""
+                error = run_result.stderr if run_result.stderr else ""
+                
+                if run_result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Runtime Error:\n{error}"
+        
+        # C++
+        elif language == "C++":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.cpp', delete=False) as f:
+                f.write(code)
+                cpp_file = f.name
+            
+            exe_file = cpp_file.replace('.cpp', '')
+            
+            try:
+                # Compile
+                compile_result = subprocess.run(
+                    ['g++', cpp_file, '-o', exe_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if compile_result.returncode != 0:
+                    return f"❌ Compilation Error:\n{compile_result.stderr}"
+                
+                # Run
+                run_result = subprocess.run(
+                    [exe_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = run_result.stdout if run_result.stdout else ""
+                error = run_result.stderr if run_result.stderr else ""
+                
+                if run_result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Runtime Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ g++ compiler not installed on this system"
+            finally:
+                if os.path.exists(cpp_file):
+                    os.unlink(cpp_file)
+                if os.path.exists(exe_file):
+                    os.unlink(exe_file)
+        
+        # C
+        elif language == "C":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
+                f.write(code)
+                c_file = f.name
+            
+            exe_file = c_file.replace('.c', '')
+            
+            try:
+                # Compile
+                compile_result = subprocess.run(
+                    ['gcc', c_file, '-o', exe_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if compile_result.returncode != 0:
+                    return f"❌ Compilation Error:\n{compile_result.stderr}"
+                
+                # Run
+                run_result = subprocess.run(
+                    [exe_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = run_result.stdout if run_result.stdout else ""
+                error = run_result.stderr if run_result.stderr else ""
+                
+                if run_result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Runtime Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ gcc compiler not installed on this system"
+            finally:
+                if os.path.exists(c_file):
+                    os.unlink(c_file)
+                if os.path.exists(exe_file):
+                    os.unlink(exe_file)
+        
+        # Go
+        elif language == "Go":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.go', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                result = subprocess.run(
+                    ['go', 'run', temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = result.stdout if result.stdout else ""
+                error = result.stderr if result.stderr else ""
+                
+                if result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Execution Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ Go runtime not installed on this system"
+            finally:
+                os.unlink(temp_file)
+        
+        # Ruby
+        elif language == "Ruby":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.rb', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                result = subprocess.run(
+                    ['ruby', temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = result.stdout if result.stdout else ""
+                error = result.stderr if result.stderr else ""
+                
+                if result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Execution Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ Ruby runtime not installed on this system"
+            finally:
+                os.unlink(temp_file)
+        
+        # PHP
+        elif language == "PHP":
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.php', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            
+            try:
+                result = subprocess.run(
+                    ['php', temp_file],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                output = result.stdout if result.stdout else ""
+                error = result.stderr if result.stderr else ""
+                
+                if result.returncode == 0:
+                    return output if output else "✅ Code executed successfully (no output)"
+                else:
+                    return f"❌ Execution Error:\n{error}"
+            except FileNotFoundError:
+                return "❌ PHP runtime not installed on this system"
+            finally:
+                os.unlink(temp_file)
+        
+        else:
+            return f"⚠️ Direct execution for {language} is not yet supported on this platform.\n\nSupported languages: Python, JavaScript, Java, C, C++, Go, Ruby, PHP"
+    
+    except subprocess.TimeoutExpired:
+        return "❌ Execution timeout! Code took too long to run (>10 seconds)."
+    except Exception as e:
+        return f"❌ Execution error: {str(e)}"
+
+def analyze_code(code, language, api_key):
+    """Analyze code with AI"""
+    global client, current_user
+    
+    if not current_user:
+        return "⚠️ Please login first!", "⚠️ Login Required", "", "", "⚠️ Login Required"
+    
+    try:
+        if not client and api_key:
+            init_result = initialize_groq(api_key)
+            if "❌" in init_result or "⚠️" in init_result:
+                return init_result, "⚠️ API Key Required", "", "", "⚠️ Configure API Key"
+        
+        if not client:
+            return "⚠️ Please set your Groq API key first!", "⚠️ API Key Required", "", "", "⚠️ Configure API Key"
+        
+        if not code.strip():
+            return "⚠️ Please enter code to analyze!", "⚠️ No Code", "", "", "⚠️ Code Required"
+        
+        system_prompt = f"""You are CodeRefine Premium, an expert code analyzer for {language}.
+
+Provide a comprehensive analysis with:
+1. **ERROR STATUS**: "NO ERRORS DETECTED" or "ERRORS FOUND"
+2. **Issues & Suggestions**: List any problems or improvements
+3. **CORRECTED CODE**: Provide fixed version if errors exist
+4. **COMPLEXITY ANALYSIS**:
+   - Time Complexity: O(?)
+   - Space Complexity: O(?)
+5. **Code Quality**: Brief assessment
+6. **Best Practices**: Key recommendations
+
+Be professional, concise, and actionable."""
+
+        user_prompt = f"""Analyze this {language} code:
+
+```{language.lower()}
+{code}
+```
+
+Provide analysis in this format:
+
+## 🔍 Analysis Results
+
+**ERROR STATUS:** [NO ERRORS DETECTED / ERRORS FOUND]
+
+**Issues Found:**
+- [List issues or "None detected"]
+
+**CORRECTED CODE:**
+```{language.lower()}
+[Corrected code or "No corrections needed"]
+```
+
+**⏱️ TIME COMPLEXITY:** O(?)
+
+**💾 SPACE COMPLEXITY:** O(?)
+
+**📊 CODE QUALITY:** [Brief assessment]
+
+**✨ RECOMMENDATIONS:**
+- [Key improvements]"""
+
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            max_tokens=2000,
+        )
+        
+        analysis = chat_completion.choices[0].message.content
+        
+        # Parse error status
+        if "NO ERRORS DETECTED" in analysis.upper() or ("NO ERRORS" in analysis.upper() and "ERRORS FOUND" not in analysis.upper()):
+            error_status = "✅ NO ERRORS DETECTED"
+        else:
+            error_status = "❌ ERRORS FOUND"
+        
+        # Extract corrected code
+        corrected_code = ""
+        code_match = re.search(r'```[\w]*\n(.*?)\n```', analysis, re.DOTALL)
+        if code_match:
+            corrected_code = code_match.group(1).strip()
+            if "no correction" in corrected_code.lower() or "no corrections needed" in corrected_code.lower():
+                corrected_code = "✅ No corrections needed - code is clean!"
+        else:
+            corrected_code = "✅ No corrections needed"
+        
+        # Extract complexities
+        time_complexity = "Not analyzed"
+        space_complexity = "Not analyzed"
+        
+        time_match = re.search(r'TIME COMPLEXITY[:\s]+O\(([^)]+)\)', analysis, re.IGNORECASE)
+        if time_match:
+            time_complexity = f"O({time_match.group(1).strip()})"
+        
+        space_match = re.search(r'SPACE COMPLEXITY[:\s]+O\(([^)]+)\)', analysis, re.IGNORECASE)
+        if space_match:
+            space_complexity = f"O({space_match.group(1).strip()})"
+        
+        complexity_display = f"⏱️ Time: {time_complexity}  |  💾 Space: {space_complexity}"
+        
+        # Update user stats
+        if current_user in users_db:
+            users_db[current_user]["analyses_count"] = users_db[current_user].get("analyses_count", 0) + 1
+            save_users()
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        status_display = f"✅ Analysis completed at {timestamp}"
+        
+        return analysis, error_status, corrected_code, complexity_display, status_display
+        
+    except Exception as e:
+        return f"❌ Error: {str(e)}", "❌ ANALYSIS FAILED", "", "", f"❌ Failed: {str(e)}"
+
+def run_code_handler(code, language):
+    """Run code and show output directly"""
+    output = execute_code(code, language)
+    return output
+
+def analyze_code_handler(code, language, api_key):
+    """Analyze code without execution"""
+    return analyze_code(code, language, api_key)
+
+# Premium CSS Theme
+custom_css = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+    --primary: #6366f1;
+    --primary-dark: #4f46e5;
+    --primary-light: #818cf8;
+    --secondary: #8b5cf6;
+    --success: #10b981;
+    --error: #ef4444;
+    --warning: #f59e0b;
+    --background: #0f172a;
+    --surface: #1e293b;
+    --surface-light: #334155;
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --border: #334155;
+}
+
+* {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+body {
+    background: var(--background);
+    color: var(--text);
+}
+
+.gradio-container {
+    max-width: 1800px !important;
+    margin: 0 auto !important;
+    background: var(--background) !important;
+}
+
+/* Premium Header */
+.premium-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 60px 40px;
+    border-radius: 24px;
+    text-align: center;
+    color: white;
+    margin-bottom: 40px;
+    box-shadow: 0 25px 50px -12px rgba(102, 126, 234, 0.4);
+    position: relative;
+    overflow: hidden;
+}
+
+.premium-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+    animation: pulse 4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 0.5; }
+    50% { transform: scale(1.1); opacity: 0.8; }
+}
+
+.premium-header h1 {
+    font-size: 4em;
+    font-weight: 800;
+    margin: 0 0 20px 0;
+    text-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    letter-spacing: -2px;
+    position: relative;
+    z-index: 1;
+}
+
+.premium-header h3 {
+    font-size: 1.6em;
+    font-weight: 500;
+    margin: 0 0 15px 0;
+    opacity: 0.95;
+    position: relative;
+    z-index: 1;
+}
+
+.premium-header p {
+    font-size: 1.2em;
+    opacity: 0.9;
+    margin: 0;
+    position: relative;
+    z-index: 1;
+}
+
+/* Auth Card */
+.auth-card {
+    background: var(--surface);
+    border-radius: 24px;
+    padding: 50px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    max-width: 600px;
+    margin: 60px auto;
+}
+
+/* Premium Cards */
+.premium-card {
+    background: linear-gradient(135deg, var(--surface) 0%, var(--surface-light) 100%);
+    border-radius: 20px;
+    padding: 25px;
+    margin: 15px 0;
+    border: 1px solid var(--border);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    transition: all 0.4s cubic-bezier(0.4,
